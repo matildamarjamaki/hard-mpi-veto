@@ -1,0 +1,450 @@
+diff --git a/Decay/HwDecayHandler.cc b/Decay/HwDecayHandler.cc
+index 8c32602f0..a02d717f0 100644
+--- a/Decay/HwDecayHandler.cc
++++ b/Decay/HwDecayHandler.cc
+@@ -1,3 +1,4 @@
++#include "../SecondaryRandomStream.h"
+ // -*- C++ -*-
+ //
+ // HwDecayHandler.cc is a part of Herwig - A multi-purpose Monte Carlo event generator
+@@ -13,6 +14,8 @@
+ 
+ #include "HwDecayHandler.h"
+ #include "ThePEG/Utilities/DescribeClass.h"
++#include <ThePEG/Repository/UseRandom.h>
++#include <ThePEG/Repository/StandardRandom.h>
+ #include "ThePEG/Handlers/EventHandler.h"
+ #include "ThePEG/Handlers/Hint.h"
+ #include "ThePEG/PDT/ParticleData.h"
+@@ -31,11 +34,20 @@
+ #include "Herwig/Utilities/EnumParticles.h"
+ 
+ using namespace Herwig;
++
++
++
+ using namespace ThePEG::Helicity;
+ 
+ void HwDecayHandler::
+ handle(EventHandler &, const tPVector & tagged,
+        const Hint &) {
++  ThePEG::UseRandom useDecayRandom(HerwigRNG::secondaryRandomStream());
++
++  std::cerr << "RNG_DECAY_ACTIVE "
++            << &ThePEG::UseRandom::current()
++            << std::endl;
++
+   // First go through the tagged particles for unstable ones
+   tPVector parents;
+   for(int i = 0, N = tagged.size(); i<N; ++i) {
+diff --git a/Hadronization/ClusterHadronizationHandler.cc b/Hadronization/ClusterHadronizationHandler.cc
+index 349e18548..8a0a04e4a 100644
+--- a/Hadronization/ClusterHadronizationHandler.cc
++++ b/Hadronization/ClusterHadronizationHandler.cc
+@@ -1,3 +1,4 @@
++#include "../SecondaryRandomStream.h"
+ // -*- C++ -*-
+ //
+ // ClusterHadronizationHandler.cc is a part of Herwig - A multi-purpose Monte Carlo event generator
+@@ -30,9 +31,14 @@
+ #include "CluHadConfig.h"
+ #include "Cluster.h"
+ #include <ThePEG/Utilities/DescribeClass.h>
++#include <ThePEG/Repository/UseRandom.h>
++#include <ThePEG/Repository/StandardRandom.h>
+ 
+ using namespace Herwig;
+ 
++
++
++
+ ClusterHadronizationHandler * ClusterHadronizationHandler::currentHandler_ = 0;
+ 
+ DescribeClass<ClusterHadronizationHandler,HadronizationHandler>
+@@ -163,6 +169,12 @@ namespace {
+ void ClusterHadronizationHandler::
+ handle(EventHandler & ch, const tPVector & tagged,
+        const Hint &) {
++  ThePEG::UseRandom useHadRandom(HerwigRNG::secondaryRandomStream());
++
++  std::cerr << "RNG_HAD_ACTIVE "
++            << &ThePEG::UseRandom::current()
++            << std::endl;
++
+   useMe();
+   currentHandler_ = this;
+   PVector currentlist(tagged.begin(),tagged.end());
+diff --git a/Shower/ShowerHandler.cc b/Shower/ShowerHandler.cc
+index 00eb095a4..aa6c10f58 100644
+--- a/Shower/ShowerHandler.cc
++++ b/Shower/ShowerHandler.cc
+@@ -1,3 +1,7 @@
++#include <cstdint>
++#include <iomanip>
++#include <sstream>
++#include "../SecondaryRandomStream.h"
+ // -*- C++ -*-
+ //
+ // ShowerHandler.cc is a part of Herwig - A multi-purpose Monte Carlo event generator
+@@ -28,6 +32,8 @@
+ #include "ThePEG/Persistency/PersistentOStream.h"
+ #include "ThePEG/Persistency/PersistentIStream.h"
+ #include "ThePEG/Repository/EventGenerator.h"
++#include "ThePEG/Repository/StandardRandom.h"
++#include "ThePEG/Repository/UseRandom.h"
+ #include "Herwig/Utilities/EnumParticles.h"
+ #include "Herwig/PDF/MPIPDF.h"
+ #include "Herwig/PDF/MinBiasPDF.h"
+@@ -38,8 +44,19 @@
+ #include "Herwig/Decay/DecayIntegrator.h"
+ #include "Herwig/Decay/DecayPhaseSpaceMode.h"
+ 
++
++static std::uint64_t mixEventSeed(std::uint64_t x) {
++  x += 0x9e3779b97f4a7c15ULL;
++  x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
++  x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
++  return x ^ (x >> 31);
++}
++
+ using namespace Herwig;
+ 
++
++
++
+ DescribeClass<ShowerHandler,CascadeHandler>
+ describeShowerHandler ("Herwig::ShowerHandler","HwShower.so");
+ 
+@@ -95,7 +112,9 @@ ShowerHandler::ShowerHandler() :
+ void ShowerHandler::doinitrun(){
+   CascadeHandler::doinitrun();
+   //can't use isMPIOn here, because the EventHandler is not set at that stage
+-  if(MPIHandler_) { 
++  if(MPIHandler_) {
++    // Experimental test: isolate RNG consumption during MPI initialization.
++    ThePEG::UseRandom useMPIRandom(HerwigRNG::secondaryRandomStream());
+     MPIHandler_->initialize();
+     if(MPIHandler_->softInt())
+       remDec_->initSoftInteractions(MPIHandler_->Ptmin(), MPIHandler_->beta());
+@@ -428,6 +447,44 @@ void ShowerHandler::cascade() {
+     if(primaryXC->matrixElement())
+       primaryMEScale = primaryXC->matrixElement()->scale();
+   }
++  else if(lastXCombPtr()) {
++    primaryMEScale = lastXCombPtr()->lastScale();
++  }
++
++  // RNG diagnostic: record the primary hard process before shower/MPI.
++  {
++    SubProPtr hard = eventHandler()->currentCollision()->primarySubProcess();
++
++    std::cerr << "RNG_HARD_BEGIN" << std::endl;
++
++    auto printParticle = [](const char* label, tPPtr p) {
++      if (!p) return;
++      const auto& m = p->momentum();
++
++      std::cerr << "RNG_HARD "
++                << label << " "
++                << p->id() << " "
++                << m.x()/GeV << " "
++                << m.y()/GeV << " "
++                << m.z()/GeV << " "
++                << m.e()/GeV
++                << std::endl;
++    };
++
++    printParticle("IN", hard->incoming().first);
++    printParticle("IN", hard->incoming().second);
++
++    for (const auto& p : hard->outgoing()) {
++      printParticle("OUT", p);
++    }
++
++    std::cerr << "RNG_HARD_END" << std::endl;
++  }
++
++  std::cerr << "RNG_CHECK_A "
++            << &ThePEG::UseRandom::current()
++            << std::endl;
++
+ 
+   // first shower the hard process
+   try {
+@@ -440,6 +497,28 @@ void ShowerHandler::cascade() {
+                       << " attempts in ShowerHandler::cascade()"
+                       << Exception::eventerror;
+   }
++
++  // RNG diagnostic: primary shower before remnant processing and MPI.
++  {
++    std::cerr << "RNG_SHOWER_BEGIN" << std::endl;
++
++    for (const auto& p : currentStep()->particles()) {
++      if (!p) continue;
++
++      const auto& m = p->momentum();
++
++      std::cerr << "RNG_SHOWER "
++                << p->id() << " "
++                << m.x()/GeV << " "
++                << m.y()/GeV << " "
++                << m.z()/GeV << " "
++                << m.e()/GeV
++                << std::endl;
++    }
++
++    std::cerr << "RNG_SHOWER_END" << std::endl;
++  }
++
+   if(showerHardProcessVeto()) throw Veto();
+   // if a non-hadron collision return (both incoming non-hadronic)
+   if( ( !incomingBins.first||
+@@ -469,8 +548,14 @@ void ShowerHandler::cascade() {
+   }
+   // perform the reweighting for the hard process shower
+   combineWeights();
++  std::cerr << "RNG_CHECK_B "
++            << &ThePEG::UseRandom::current()
++            << std::endl;
++
++
+   // if no MPI return
+   if( !isMPIOn() ) {
++    ThePEG::UseRandom useMPIRandom(HerwigRNG::secondaryRandomStream());
+     remnantDecayer()->finalize();
+     // boost back to lab if needed
+     if(btotal) boostCollision(true);
+@@ -478,6 +563,30 @@ void ShowerHandler::cascade() {
+     unSetCurrentHandler();
+     return;
+   }
++  // Use an event-specific secondary RNG seed.
++  const long eventNumber =
++      eventHandler()->currentEvent()->number();
++
++  const std::uint64_t mixedSeed =
++      mixEventSeed(987654322ULL ^
++                   static_cast<std::uint64_t>(eventNumber));
++
++  const long secondarySeed =
++      static_cast<long>(1ULL + (mixedSeed % 900000000ULL));
++
++  HerwigRNG::secondaryRandomStream()->setSeed(secondarySeed);
++
++  std::cerr << "RNG_EVENT_SEED "
++            << eventNumber << " "
++            << secondarySeed << std::endl;
++
++  ThePEG::UseRandom useMPIRandom(HerwigRNG::secondaryRandomStream());
++
++  std::cerr << "RNG_CHECK_C "
++            << &ThePEG::UseRandom::current()
++            << std::endl;
++
++
+   // generate the multiple scatters use modified pdf's now:
+   setMPIPDFs();
+   // additional "hard" processes
+@@ -542,25 +651,62 @@ void ShowerHandler::cascade() {
+   // the underlying event processes
+   unsigned int ptveto(1), veto(0);
+   unsigned int max(getMPIHandler()->multiplicity());
++  unsigned long mpiAttempt = 0;
++
++  std::cerr << "RNG_MPI_MULTIPLICITY "
++            << max << std::endl;
+   for(unsigned int i=0; i<max; i++) {
+     // check how often this scattering has been regenerated
+     if(veto > maxtryMPI_) break;
+     //generate PSpoint
++    std::cerr << "RNG_MPI_ATTEMPT_BEGIN "
++              << eventNumber << " "
++              << mpiAttempt << " "
++              << i << std::endl;
++
+     tStdXCombPtr lastXC = getMPIHandler()->generate();
+     SubProPtr sub = lastXC->construct();
+ 
++    std::cerr << "RNG_MPI_ATTEMPT_END "
++              << eventNumber << " "
++              << mpiAttempt << " "
++              << i << std::endl;
++
++    for (const auto & particle : sub->outgoing()) {
++      const auto & p = particle->momentum();
++      std::cerr << "RNG_MPI_ATTEMPT_KIN "
++                << eventNumber << " "
++                << mpiAttempt << " "
++                << i << " "
++                << std::setprecision(17)
++                << p.perp()/GeV << " "
++                << p.e()/GeV << " "
++                << p.x()/GeV << " "
++                << p.y()/GeV << " "
++                << p.z()/GeV << std::endl;
++    }
++
++    ++mpiAttempt;
++
++    // Capture outgoing MPI parton momenta before showering.
++    std::ostringstream mpiKin;
++    for (const auto & particle : sub->outgoing()) {
++      const auto & p = particle->momentum();
++      mpiKin << "RNG_MPI_KIN "
++             << i << " "
++             << std::setprecision(17)
++             << p.perp()/GeV << " "
++             << p.e()/GeV << " "
++             << p.x()/GeV << " "
++             << p.y()/GeV << " "
++             << p.z()/GeV << "\n";
++    }
++
+     // Enforce event-by-event ordering between the primary matrix-element
+     // scale and the underlying-event scattering scale. If the MPI
+     // scattering is harder, reject it and generate another one.
+-    if(primaryMEScale > ZERO && lastXC->matrixElement()) {
+-      Energy2 mpiMEScale = lastXC->matrixElement()->scale();
+-
+-      if(mpiMEScale > primaryMEScale) {
+-        veto++;
+-        i--;
+-        continue;
+-      }
+-    }
++    // Hard-MPI veto disabled for controlled RNG ON/OFF validation.
++    // All other RNG and MPI generation logic remains unchanged.
+ 
+     //If Algorithm=1 additional scatters of the signal type
+     // with pt > ptmin have to be vetoed
+@@ -614,6 +760,11 @@ void ShowerHandler::cascade() {
+     veto = 0;
+     // perform the reweighting for the MPI process shower
+     combineWeights();
++
++    // Output only accepted MPI subprocesses.
++    std::cerr << mpiKin.str();
++
++
+   }
+   // finalize the remnants
+   remnantDecayer()->finalize(getMPIHandler()->colourDisrupt(), 
+diff --git a/UnderlyingEvent/MPISampler.cc b/UnderlyingEvent/MPISampler.cc
+index 525f7aae8..7c0fdb299 100644
+--- a/UnderlyingEvent/MPISampler.cc
++++ b/UnderlyingEvent/MPISampler.cc
+@@ -47,6 +47,7 @@ void MPISampler::initialize() {
+ }
+ 
+ double MPISampler::generate() {
++
+   if ( !theSampler.generate() ) throw EventLoopException()
+     << "The maximum number of attempts per event (" << theProcessHandler->maxLoop()
+     << ") in multiple interaction handler '" << theProcessHandler->name() << "' was exceeded."
+@@ -132,6 +133,19 @@ void MPISampler::doinitrun() {
+ 
+ }
+ 
++void MPISampler::printRNGSamplerState() const {
++std::cerr
++      << "RNG_SAMPLER_STATE"
++      << " handler=" << theProcessHandler->name()
++      << " N=" << theSampler.N()
++      << " n=" << theSampler.n()
++      << " nBins=" << theSampler.nBins()
++      << " depth=" << theSampler.depth()
++      << " maxInt=" << theSampler.maxInt()
++      << " compleft=" << theSampler.compleft()
++      << std::endl;
++}
++
+ void MPISampler::persistentOutput(PersistentOStream & os) const {
+   os << theEps << theMargin << theNTry << theProcessHandler;
+   theSampler.output(os);
+diff --git a/UnderlyingEvent/MPISampler.h b/UnderlyingEvent/MPISampler.h
+index 93e6587db..bef8ca22b 100644
+--- a/UnderlyingEvent/MPISampler.h
++++ b/UnderlyingEvent/MPISampler.h
+@@ -82,6 +82,8 @@ public:
+    */
+   virtual double generate();
+ 
++  void printRNGSamplerState() const;
++
+   /**
+    * ACDCSampler is able to sample several different functions
+    * separately. This function returns the last chosen
+diff --git a/UnderlyingEvent/ProcessHandler.cc b/UnderlyingEvent/ProcessHandler.cc
+index 3a8fe98c2..c90945772 100644
+--- a/UnderlyingEvent/ProcessHandler.cc
++++ b/UnderlyingEvent/ProcessHandler.cc
+@@ -12,6 +12,7 @@
+ //
+ 
+ #include "ProcessHandler.h"
++#include <iomanip>
+ #include "ThePEG/Utilities/DescribeClass.h"
+ #include "MPISampler.h"
+ 
+@@ -260,6 +261,31 @@ int ProcessHandler::nBins() const {
+   return -1;
+ }
+ 
++tStdXCombPtr ProcessHandler::generate() {
++  std::cerr << "RNG_SAMPLER_BEFORE" << std::endl;
++  dynamic_ptr_cast<MPISamplerPtr>(sampler())->printRNGSamplerState();
++
++  double wgt = sampler()->generate();
++
++  const ThePEG::SamplerBase& acdcSampler = *sampler();
++
++  std::cerr << "RNG_ACDC_POINT"
++            << " bin=" << acdcSampler.lastBin()
++            << " ndim=" << acdcSampler.lastPoint().size()
++            << " point=";
++
++  for (double x : acdcSampler.lastPoint()) {
++    std::cerr << " " << std::setprecision(17) << x;
++  }
++
++  std::cerr << std::endl;
++
++  std::cerr << "RNG_SAMPLER_AFTER" << std::endl;
++  dynamic_ptr_cast<MPISamplerPtr>(sampler())->printRNGSamplerState();
++
++  return select(sampler()->lastBin(), wgt);
++}
++
+ void ProcessHandler::doinitrun() {
+   Interfaced::doinitrun();
+ 
+diff --git a/UnderlyingEvent/ProcessHandler.h b/UnderlyingEvent/ProcessHandler.h
+index c420343d8..7c2584472 100644
+--- a/UnderlyingEvent/ProcessHandler.h
++++ b/UnderlyingEvent/ProcessHandler.h
+@@ -91,7 +91,7 @@ public:
+    * Select a StandardXComb according to it's weight
+    * @return that StandardXComb Object
+    */
+-  inline tStdXCombPtr generate();
++  tStdXCombPtr generate();
+   //@}
+ 
+ 
+diff --git a/UnderlyingEvent/ProcessHandler.icc b/UnderlyingEvent/ProcessHandler.icc
+index 52394c727..1b560be63 100644
+--- a/UnderlyingEvent/ProcessHandler.icc
++++ b/UnderlyingEvent/ProcessHandler.icc
+@@ -83,10 +83,7 @@ inline int ProcessHandler::binStrategy() const {
+   return theBinStrategy;
+ }
+ 
+-inline tStdXCombPtr ProcessHandler::generate() {
+-  double wgt = sampler()->generate();
+-  return select(sampler()->lastBin(), wgt);
+-}
++
+ 
+ inline IBPtr ProcessHandler::clone() const {
+   return new_ptr(*this);
