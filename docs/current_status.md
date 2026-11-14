@@ -36,4 +36,4 @@ are whitespace changes.
 - Local directory structure established.
 - Older Herwig update folders archived.
 - Git repository initialized.
-- Initial commit and CERN GitLab remote pending.
+- GitHub repository initialized and synchronized with origin/main.
